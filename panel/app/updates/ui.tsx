@@ -12,74 +12,40 @@ function companiesForRole(role: Role) {
   return [];
 }
 
-/**
- * Normaliza o texto de empresa vindo do Sheet (porque pode estar "TOY FORMATURAS",
- * "T.BRANDS - T.DREAMS", "MIRANTE", etc.)
- */
 function normalize(s: string) {
-  return (s || "")
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .replace(/[.]/g, "")
-    .trim();
+  return (s || "").toUpperCase().replace(/\s+/g, " ").replace(/[.]/g, "").trim();
 }
 
-/**
- * Mapeamento esperto de empresa:
- * - Você pode ajustar/expandir facilmente se aparecerem novos nomes “antigos”.
- */
 function matchCompany(sheetEmpresa: string, selected: string) {
   if (selected === "TODAS") return true;
 
   const e = normalize(sheetEmpresa);
   const sel = normalize(selected);
+  const parts = e.split(" - ").map((p) => p.trim());
+  const has = (needle: string) => parts.some((p) => p.includes(needle)) || e.includes(needle);
 
-  // quebra multi-empresa "A - B - C"
-  const parts = e.split(" - ").map(p => p.trim());
+  if (sel === "TYOUTH") return has("TYOUTH") || has("TOY") || has("FORMATURAS") || has("NEO") || has("MED");
+  if (sel === "TBRANDS") return has("TBRANDS") || has("TAJ BRANDS") || has("BRANDS") || has("CONSULTORIA");
+  if (sel === "TDREAMS") return has("TDREAMS") || has("DREAMS") || has("MIRANTE") || has("PEOPLE");
+  if (sel === "TVENUES") return has("TVENUES") || has("VENUES");
+  if (sel === "TGROUP") return has("TGROUP") || has("HOLDING") || has("THOLDING") || has("GRUPO T");
 
-  // helpers
-  const has = (needle: string) => parts.some(p => p.includes(needle)) || e.includes(needle);
-
-  if (sel === "TYOUTH") {
-    // Toy Formaturas / Neo / Toy Med etc
-    return has("TYOUTH") || has("TOY") || has("FORMATURAS") || has("NEO") || has("MED");
-  }
-
-  if (sel === "TBRANDS") {
-    return has("TBRANDS") || has("TAJ BRANDS") || has("BRANDS") || has("CONSULTORIA");
-  }
-
-  if (sel === "TDREAMS") {
-    // Dreams + Mirante (se no seu financeiro entra como Dreams)
-    return has("TDREAMS") || has("DREAMS") || has("MIRANTE") || has("PEOPLE");
-  }
-
-  if (sel === "TVENUES") {
-    return has("TVENUES") || has("VENUES");
-  }
-
-  if (sel === "TGROUP") {
-    return has("TGROUP") || has("HOLDING") || has("THOLDING") || has("GRUPO T");
-  }
-
-  // fallback (se no futuro vier exatamente “T.YOUTH” etc)
   return has(sel);
 }
 
-const MONTH = {
+const MONTH: Record<string, number> = {
   JAN: 1, FEV: 2, MAR: 3, ABR: 4, MAI: 5, JUN: 6,
-  JUL: 7, AGO: 8, SET: 9, OUT: 10, NOV: 11, DEZ: 12
-} as const;
+  JUL: 7, AGO: 8, SET: 9, OUT: 10, NOV: 11, DEZ: 12,
+};
 
 function parseMonthKey(title: string) {
-  // Ex: "Update Colaboradores Jan-26" ou "Updates Colaboradores Nov-25"
   const m = title.match(/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)-(\d{2})/i);
   if (!m) return null;
-  const mm = (m[1] || "").toUpperCase() as keyof typeof MONTH;
+  const mm = (m[1] || "").toUpperCase();
   const yy = Number(m[2]);
   const year = 2000 + yy;
   const month = MONTH[mm] || 0;
-  return year * 100 + month; // chave ordenável
+  return year * 100 + month;
 }
 
 async function fetchMeta() {
@@ -94,41 +60,58 @@ async function fetchSheet(sheetName: string) {
 
 export default function UpdatesClient({ role }: { role: Role }) {
   const companies = useMemo(() => companiesForRole(role), [role]);
-  const [company, setCompany] = useState(companies[0] || "TODAS");
 
+  const [company, setCompany] = useState(companies[0] || "TODAS");
   const [sheets, setSheets] = useState<string[]>([]);
   const [sheet, setSheet] = useState<string>("");
+
+  const [manualSheet, setManualSheet] = useState("Update Colaboradores Jan-26");
+  const [useManual, setUseManual] = useState(false);
 
   const [rows, setRows] = useState<any[]>([]);
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [actionFilter, setActionFilter] = useState("TODAS");
 
+  const [metaError, setMetaError] = useState<string | null>(null);
+
   useEffect(() => {
     (async () => {
       const meta = await fetchMeta();
-      if (!meta.ok) return;
+      if (!meta.ok) {
+        setMetaError(meta.error || "Falha ao listar abas (api/meta).");
+        setSheets([]);
+        // fallback automático pro manual
+        setUseManual(true);
+        setSheet("");
+        return;
+      }
 
       const ups: string[] = meta.updates || [];
       setSheets(ups);
+      setMetaError(null);
 
-      // escolhe a aba mais recente pelo padrão MES-ANO no título
-      const sorted = [...ups].sort((a, b) => {
-        const ka = parseMonthKey(a) ?? 0;
-        const kb = parseMonthKey(b) ?? 0;
-        return ka - kb;
-      });
+      if (!ups.length) {
+        // Sem abas update detectadas: ativa fallback manual
+        setUseManual(true);
+        setSheet("");
+        return;
+      }
 
-      const last = sorted[sorted.length - 1] || "";
+      const sorted = [...ups].sort((a, b) => (parseMonthKey(a) ?? 0) - (parseMonthKey(b) ?? 0));
+      const last = sorted[sorted.length - 1];
+      setUseManual(false);
       setSheet(last);
     })();
   }, []);
 
   async function load() {
-    if (!sheet) return;
+    const target = useManual ? manualSheet : sheet;
+    if (!target) return;
+
     setLoading(true);
     try {
-      const data = await fetchSheet(sheet);
+      const data = await fetchSheet(target);
       if (!data.ok) {
         setRows([]);
         return;
@@ -150,9 +133,11 @@ export default function UpdatesClient({ role }: { role: Role }) {
     }
   }
 
+  // carrega automaticamente quando sheet (ou manual) muda
   useEffect(() => {
     load();
-  }, [sheet]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sheet, useManual]);
 
   const actions = useMemo(() => {
     const set = new Set<string>();
@@ -185,7 +170,6 @@ export default function UpdatesClient({ role }: { role: Role }) {
   }, [filtered]);
 
   function exportCSV() {
-    // Usa o padrão da sua planilha (Jan-26)
     const headers = [
       "CONTRATO",
       "COLABORADOR",
@@ -212,7 +196,8 @@ export default function UpdatesClient({ role }: { role: Role }) {
       headers
     );
 
-    downloadText(`UPDATES_${sheet.replace(/\s+/g, "_")}.csv`, csv);
+    const title = (useManual ? manualSheet : sheet) || "UPDATES";
+    downloadText(`UPDATES_${title.replace(/\s+/g, "_")}.csv`, csv);
   }
 
   return (
@@ -223,27 +208,54 @@ export default function UpdatesClient({ role }: { role: Role }) {
           Admissões, desligamentos, reajustes e movimentações — com filtros e export.
         </p>
 
+        {metaError ? (
+          <p style={{ marginTop: 10, color: "rgba(255,180,180,.95)" }}>
+            ⚠️ {metaError} (fallback manual ativado)
+          </p>
+        ) : null}
+
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
-          <div>
+          <div style={{ minWidth: 260 }}>
             <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Mês (aba)</div>
-            <select
-              value={sheet}
-              onChange={(e) => setSheet(e.target.value)}
-              style={{
-                padding: "12px 12px",
-                borderRadius: 14,
-                border: "1px solid rgba(255,255,255,.18)",
-                background: "rgba(10,15,30,.35)",
-                color: "rgba(255,255,255,.92)",
-                minWidth: 260,
-              }}
-            >
-              {sheets.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+
+            {!useManual ? (
+              <select
+                value={sheet}
+                onChange={(e) => setSheet(e.target.value)}
+                style={{
+                  padding: "12px 12px",
+                  borderRadius: 14,
+                  border: "1px solid rgba(255,255,255,.18)",
+                  background: "rgba(10,15,30,.35)",
+                  color: "rgba(255,255,255,.92)",
+                  width: "100%",
+                }}
+              >
+                {sheets.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input
+                value={manualSheet}
+                onChange={(e) => setManualSheet(e.target.value)}
+                placeholder="Ex: Update Colaboradores Jan-26"
+              />
+            )}
+
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+              <label style={{ cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={useManual}
+                  onChange={(e) => setUseManual(e.target.checked)}
+                  style={{ marginRight: 8 }}
+                />
+                Digitar nome da aba manualmente
+              </label>
+            </div>
           </div>
 
           <div>
@@ -312,21 +324,27 @@ export default function UpdatesClient({ role }: { role: Role }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr>
-                {["COLABORADOR", "EMPRESA", "AÇÃO", "SALÁRIO ATUAL", "SALÁRIO REAJUSTADO", "VALOR TOTAL DA RESCISÃO (SALÁRIO + SALDO FÉRIAS)", "OBSERVAÇÕES:"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      style={{
-                        textAlign: "left",
-                        padding: "10px 8px",
-                        borderBottom: "1px solid rgba(255,255,255,.12)",
-                        opacity: 0.85,
-                      }}
-                    >
-                      {h}
-                    </th>
-                  )
-                )}
+                {[
+                  "COLABORADOR",
+                  "EMPRESA",
+                  "AÇÃO",
+                  "SALÁRIO ATUAL",
+                  "SALÁRIO REAJUSTADO",
+                  "VALOR TOTAL DA RESCISÃO (SALÁRIO + SALDO FÉRIAS)",
+                  "OBSERVAÇÕES:",
+                ].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      textAlign: "left",
+                      padding: "10px 8px",
+                      borderBottom: "1px solid rgba(255,255,255,.12)",
+                      opacity: 0.85,
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
