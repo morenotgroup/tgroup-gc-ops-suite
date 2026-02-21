@@ -72,3 +72,22 @@ export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
     />
   );
 }
+
+export function Chip({ text }: { text: string }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "6px 10px",
+        borderRadius: 999,
+        border: "1px solid rgba(255,255,255,.18)",
+        background: "rgba(255,255,255,.08)",
+        fontSize: 12,
+        opacity: 0.9,
+      }}
+    >
+      {text}
+    </span>
+  );
+}
