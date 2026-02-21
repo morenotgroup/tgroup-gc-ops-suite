@@ -1,17 +1,16 @@
-import { getServerSession } from "next-auth";
-
-export default async function Finance() {
-  const session: any = await getServerSession();
+export default function FinancePage() {
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
       <h2>Finance</h2>
-      <p>Este painel lê as abas FIN_<EMPRESA>_<COMP>.</p>
-      <p>Exemplos:</p>
+      <p>Este painel lê as abas FIN_&lt;EMPRESA&gt;_&lt;COMP&gt;.</p>
       <ul>
-        <li><code>/api/sheets?sheetName=FIN_TYouth_FEV-26&range=A:G&company=T.Youth</code></li>
-        <li><code>/api/sheets?sheetName=FIN_TBrands_FEV-26&range=A:G&company=T.Brands</code></li>
+        <li>
+          <code>/api/sheets?sheetName=FIN_TYouth_FEV-26&amp;range=A:G&amp;company=T.Youth</code>
+        </li>
+        <li>
+          <code>/api/sheets?sheetName=FIN_TBrands_FEV-26&amp;range=A:G&amp;company=T.Brands</code>
+        </li>
       </ul>
-      <p>Role atual: <b>{session?.role}</b></p>
     </main>
   );
 }
