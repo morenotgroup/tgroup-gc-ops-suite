@@ -49,24 +49,24 @@ function parseMonthKey(title: string) {
 }
 
 async function fetchMeta() {
-  const resp = await fetch("/api/meta");
+  const resp = await fetch("/api/meta", { cache: "no-store" });
   return await resp.json();
 }
 
 async function fetchSheet(sheetName: string) {
-  const resp = await fetch(`/api/sheets?sheetName=${encodeURIComponent(sheetName)}&range=${encodeURIComponent("A:Z")}`);
+  const resp = await fetch(
+    `/api/sheets?sheetName=${encodeURIComponent(sheetName)}&range=${encodeURIComponent("A:Z")}`,
+    { cache: "no-store" }
+  );
   return await resp.json();
 }
 
 export default function UpdatesClient({ role }: { role: Role }) {
   const companies = useMemo(() => companiesForRole(role), [role]);
-
   const [company, setCompany] = useState(companies[0] || "TODAS");
+
   const [sheets, setSheets] = useState<string[]>([]);
   const [sheet, setSheet] = useState<string>("");
-
-  const [manualSheet, setManualSheet] = useState("Update Colaboradores Jan-26");
-  const [useManual, setUseManual] = useState(false);
 
   const [rows, setRows] = useState<any[]>([]);
   const [q, setQ] = useState("");
@@ -75,14 +75,14 @@ export default function UpdatesClient({ role }: { role: Role }) {
 
   const [metaError, setMetaError] = useState<string | null>(null);
 
+  // carrega meta e define sheet default (mais recente)
   useEffect(() => {
     (async () => {
       const meta = await fetchMeta();
+
       if (!meta.ok) {
         setMetaError(meta.error || "Falha ao listar abas (api/meta).");
         setSheets([]);
-        // fallback automático pro manual
-        setUseManual(true);
         setSheet("");
         return;
       }
@@ -92,23 +92,18 @@ export default function UpdatesClient({ role }: { role: Role }) {
       setMetaError(null);
 
       if (!ups.length) {
-        // Sem abas update detectadas: ativa fallback manual
-        setUseManual(true);
         setSheet("");
         return;
       }
 
       const sorted = [...ups].sort((a, b) => (parseMonthKey(a) ?? 0) - (parseMonthKey(b) ?? 0));
       const last = sorted[sorted.length - 1];
-      setUseManual(false);
       setSheet(last);
     })();
   }, []);
 
-  async function load() {
-    const target = useManual ? manualSheet : sheet;
+  async function load(target: string) {
     if (!target) return;
-
     setLoading(true);
     try {
       const data = await fetchSheet(target);
@@ -133,11 +128,11 @@ export default function UpdatesClient({ role }: { role: Role }) {
     }
   }
 
-  // carrega automaticamente quando sheet (ou manual) muda
+  // quando sheet muda, carrega automaticamente
   useEffect(() => {
-    load();
+    if (sheet) load(sheet);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sheet, useManual]);
+  }, [sheet]);
 
   const actions = useMemo(() => {
     const set = new Set<string>();
@@ -196,8 +191,7 @@ export default function UpdatesClient({ role }: { role: Role }) {
       headers
     );
 
-    const title = (useManual ? manualSheet : sheet) || "UPDATES";
-    downloadText(`UPDATES_${title.replace(/\s+/g, "_")}.csv`, csv);
+    downloadText(`UPDATES_${sheet.replace(/\s+/g, "_")}.csv`, csv);
   }
 
   return (
@@ -209,53 +203,30 @@ export default function UpdatesClient({ role }: { role: Role }) {
         </p>
 
         {metaError ? (
-          <p style={{ marginTop: 10, color: "rgba(255,180,180,.95)" }}>
-            ⚠️ {metaError} (fallback manual ativado)
-          </p>
+          <p style={{ marginTop: 10, color: "rgba(255,180,180,.95)" }}>⚠️ {metaError}</p>
         ) : null}
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
-          <div style={{ minWidth: 260 }}>
+          <div style={{ minWidth: 280 }}>
             <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Mês (aba)</div>
-
-            {!useManual ? (
-              <select
-                value={sheet}
-                onChange={(e) => setSheet(e.target.value)}
-                style={{
-                  padding: "12px 12px",
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,.18)",
-                  background: "rgba(10,15,30,.35)",
-                  color: "rgba(255,255,255,.92)",
-                  width: "100%",
-                }}
-              >
-                {sheets.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <Input
-                value={manualSheet}
-                onChange={(e) => setManualSheet(e.target.value)}
-                placeholder="Ex: Update Colaboradores Jan-26"
-              />
-            )}
-
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-              <label style={{ cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={useManual}
-                  onChange={(e) => setUseManual(e.target.checked)}
-                  style={{ marginRight: 8 }}
-                />
-                Digitar nome da aba manualmente
-              </label>
-            </div>
+            <select
+              value={sheet || (sheets[0] || "")}
+              onChange={(e) => setSheet(e.target.value)}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 14,
+                border: "1px solid rgba(255,255,255,.18)",
+                background: "rgba(10,15,30,.35)",
+                color: "rgba(255,255,255,.92)",
+                width: "100%",
+              }}
+            >
+              {(sheets.length ? sheets : [""]).map((s) => (
+                <option key={s || "empty"} value={s}>
+                  {s || "—"}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -305,7 +276,7 @@ export default function UpdatesClient({ role }: { role: Role }) {
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Colaborador, observações, área..." />
           </div>
 
-          <GhostButton disabled={loading} onClick={load}>
+          <GhostButton disabled={loading} onClick={() => load(sheet)}>
             Atualizar
           </GhostButton>
           <PrimaryButton disabled={!filtered.length} onClick={exportCSV}>
