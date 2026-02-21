@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getServerSession } from "next-auth";
 import { z } from "zod";
-import { canSeeCompany } from "@/lib/rbac";
+import { canSeeCompany } from "../../../lib/rbac";
 
 const Query = z.object({
   sheetName: z.string(),
