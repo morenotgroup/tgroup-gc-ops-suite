@@ -6,11 +6,7 @@ export const metadata: Metadata = {
   description: "Painel interno para GC e Finance do T.Group",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="pt-BR">
       <body>{children}</body>
