@@ -3,7 +3,9 @@ import { getServerSession } from "next-auth";
 import { signIn, signOut } from "next-auth/react";
 
 export default async function Home() {
-  const session: any = await getServerSession();
+  const role = session?.role ?? "viewer";
+  ...
+  <p>Logado como: <b>{session.user.email}</b> • role: <b>{role}</b></p>
 
   if (!session?.user?.email) {
     return (
