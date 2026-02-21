@@ -1,6 +1,7 @@
 html, body {
   height: 100%;
   margin: 0;
+  padding: 0;
 }
 
 body{
@@ -14,4 +15,9 @@ body{
 }
 
 *{ box-sizing:border-box; }
-a{ color: rgba(255,255,255,.9); }
+
+a{
+  color: rgba(255,255,255,.92);
+  text-decoration: none;
+}
+a:hover{ text-decoration: underline; }
