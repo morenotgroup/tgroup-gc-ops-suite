@@ -24,11 +24,19 @@ export const authOptions: NextAuthOptions = {
       const email = session.user?.email || "";
 
       const gc = (process.env.ROLE_GC || "")
-        .split(",").map(s => s.trim()).filter(Boolean);
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
       const finYouth = (process.env.ROLE_FIN_YOUTH || "")
-        .split(",").map(s => s.trim()).filter(Boolean);
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
       const finCore = (process.env.ROLE_FIN_CORE || "")
-        .split(",").map(s => s.trim()).filter(Boolean);
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
 
       let role: "viewer" | "gc" | "finance_youth" | "finance_core" = "viewer";
       if (gc.includes(email)) role = "gc";
