@@ -1,10 +1,17 @@
-/* globals.css */
 html, body {
   height: 100%;
   margin: 0;
-  padding: 0;
 }
 
-* {
-  box-sizing: border-box;
+body{
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: rgba(255,255,255,.92);
+  background:
+    radial-gradient(1200px 800px at 10% 10%, rgba(252,163,17,.20), transparent 60%),
+    radial-gradient(900px 700px at 85% 20%, rgba(127,90,240,.18), transparent 55%),
+    radial-gradient(900px 700px at 60% 95%, rgba(0,212,255,.12), transparent 60%),
+    linear-gradient(135deg, #0b1020, #111a33);
 }
+
+*{ box-sizing:border-box; }
+a{ color: rgba(255,255,255,.9); }
