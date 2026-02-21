@@ -27,10 +27,18 @@ export default async function Home() {
           Logado como: <b>{session.user.email}</b> • role: <b>{role}</b>
         </p>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 16 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 12,
+            marginTop: 16,
+          }}
+        >
           <Link href="/gc">GC Console (Start/Stop)</Link>
           <Link href="/auditoria">Auditorias</Link>
           <Link href="/finance">Finance</Link>
+          <Link href="/updates">Updates</Link>
           <Link href="/desligamentos">Desligamentos (PJ)</Link>
         </div>
 
@@ -39,7 +47,14 @@ export default async function Home() {
         </div>
       </GlassCard>
 
-      <div style={{ marginTop: 14, textAlign: "center", opacity: 0.65, fontSize: 12 }}>
+      <div
+        style={{
+          marginTop: 14,
+          textAlign: "center",
+          opacity: 0.65,
+          fontSize: 12,
+        }}
+      >
         Gente e Cultura T.Group — 2026 — Todos os direitos reservados.
       </div>
     </main>
