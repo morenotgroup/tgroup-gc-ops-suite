@@ -14,10 +14,26 @@ function getServiceAccountAuth() {
   });
 }
 
+function isUpdatesSheet(title: string) {
+  const t = (title || "").trim();
+  const up = t.toUpperCase();
+
+  // pega qualquer aba que contenha UPDATE/UPDATES no nome,
+  // mesmo que tenha prefixo/sufixo ("Update Colaboradores Jan-26", "UPDATES - Jan-26", etc)
+  if (up.includes("UPDATE")) return true;
+  if (up.includes("UPDATES")) return true;
+
+  // caso você use "ATUALIZAÇÕES"
+  if (up.includes("ATUALIZA")) return true;
+
+  return false;
+}
+
 export async function GET() {
   const session: any = await getServerSession(authOptions);
-  if (!session?.user?.email)
+  if (!session?.user?.email) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
 
   const auth = getServiceAccountAuth();
   const sheets = google.sheets({ version: "v4", auth });
@@ -37,7 +53,7 @@ export async function GET() {
 
   const fins = titles.filter((t) => t.startsWith("FIN_")).sort();
 
-  const updates = titles.filter((t) => /^Update|^Updates/i.test(t)).sort();
+  const updates = titles.filter(isUpdatesSheet).sort();
 
   return NextResponse.json({ ok: true, auditorias, fins, updates });
 }
