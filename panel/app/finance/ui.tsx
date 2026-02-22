@@ -17,11 +17,6 @@ function finSheetName(company: string, comp: string) {
   return `FIN_${key}_${comp}`;
 }
 
-function pickFirstKey(obj: any, keys: string[]) {
-  for (const k of keys) if (obj && Object.prototype.hasOwnProperty.call(obj, k)) return k;
-  return keys[0];
-}
-
 function parseMoney(v: any) {
   if (v === null || v === undefined) return 0;
   const s = String(v).trim();
@@ -44,24 +39,8 @@ function statusClass(s: string) {
   return "unk";
 }
 
-function StatusChip({ text }: { text: string }) {
-  const cls = statusClass(text);
-  const styleBase: any = {
-    padding: "6px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,.16)",
-    fontSize: 12,
-    display: "inline-block",
-    whiteSpace: "nowrap",
-    background: "rgba(0,0,0,.18)",
-  };
-  const styles: Record<string, any> = {
-    ok: { ...styleBase, background: "rgba(20,180,120,.18)" },
-    pend: { ...styleBase, background: "rgba(240,180,40,.18)" },
-    crit: { ...styleBase, background: "rgba(240,80,80,.18)" },
-    unk: styleBase,
-  };
-  return <span style={styles[cls]}>{text || "—"}</span>;
+function safeStr(v: any) {
+  return String(v ?? "").trim();
 }
 
 async function fetchMeta() {
@@ -70,7 +49,6 @@ async function fetchMeta() {
 }
 
 async function fetchSheet(sheetName: string, company: string) {
-  // company param reforça RBAC no /api/sheets
   const qs = new URLSearchParams({
     sheetName,
     range: "A:Z",
@@ -78,6 +56,55 @@ async function fetchSheet(sheetName: string, company: string) {
   });
   const resp = await fetch(`/api/sheets?${qs.toString()}`, { cache: "no-store" });
   return await resp.json();
+}
+
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // fallback
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    return true;
+  }
+}
+
+function pickKey(sample: any, candidates: string[], fallback: string) {
+  for (const k of candidates) if (sample && Object.prototype.hasOwnProperty.call(sample, k)) return k;
+  return fallback;
+}
+
+function RowBadge({ kind }: { kind: "ok" | "pend" | "crit" | "unk" }) {
+  const base: any = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "6px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    fontSize: 12,
+    background: "rgba(0,0,0,.18)",
+    whiteSpace: "nowrap",
+  };
+  const styles: Record<string, any> = {
+    ok: { ...base, background: "rgba(20,180,120,.18)" },
+    pend: { ...base, background: "rgba(240,180,40,.18)" },
+    crit: { ...base, background: "rgba(240,80,80,.18)" },
+    unk: base,
+  };
+
+  const label =
+    kind === "ok" ? "OK" : kind === "pend" ? "PENDÊNCIA" : kind === "crit" ? "CRÍTICO" : "—";
+
+  const dot =
+    kind === "ok" ? "🟢" : kind === "pend" ? "🟡" : kind === "crit" ? "🔴" : "⚪";
+
+  return <span style={styles[kind]}>{dot} {label}</span>;
 }
 
 export default function FinanceClient({ role }: { role: Role }) {
@@ -91,10 +118,14 @@ export default function FinanceClient({ role }: { role: Role }) {
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
 
+  const [onlyIssues, setOnlyIssues] = useState(false);
+  const [onlyCritical, setOnlyCritical] = useState(false);
+
   const [sortBy, setSortBy] = useState<"valor" | "nome">("valor");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -153,123 +184,85 @@ export default function FinanceClient({ role }: { role: Role }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company, comp]);
 
-  const schemaKeys = useMemo(() => {
-    const sample = rows[0] || {};
+  const keys = useMemo(() => {
+    const s = rows[0] || {};
     return {
-      nome: pickFirstKey(sample, ["Nome", "COLABORADOR", "Colaborador"]),
-      valor: pickFirstKey(sample, ["Valor Esperado", "VALOR ESPERADO", "VALOR", "Valor"]),
-      nf: pickFirstKey(sample, ["NF(planilha)", "NF (planilha)", "NF", "NFS-e"]),
-      link: pickFirstKey(sample, ["Link(planilha)", "Link (planilha)", "LINK", "Link"]),
-      status: pickFirstKey(sample, ["Status", "STATUS"]),
-      pix: pickFirstKey(sample, ["PIX", "Chave Pix", "CHAVE PIX"]),
-      banco: pickFirstKey(sample, ["Banco", "BANCO"]),
-      agencia: pickFirstKey(sample, ["Agência", "AGÊNCIA", "Agencia", "AGENCIA"]),
-      conta: pickFirstKey(sample, ["Conta", "CONTA"]),
-      obs: pickFirstKey(sample, ["Observações", "OBS", "Observacao", "OBSERVAÇÕES"]),
+      nome: pickKey(s, ["Nome", "COLABORADOR", "Colaborador"], "Nome"),
+      valor: pickKey(s, ["Valor Esperado", "VALOR ESPERADO", "VALOR", "Valor"], "Valor Esperado"),
+      nf: pickKey(s, ["NF(planilha)", "NF (planilha)", "NF", "NFS-e"], "NF(planilha)"),
+      link: pickKey(s, ["Link(planilha)", "Link (planilha)", "LINK", "Link"], "Link(planilha)"),
+      status: pickKey(s, ["Status", "STATUS"], "Status"),
+      pix: pickKey(s, ["PIX", "Chave Pix", "CHAVE PIX"], "PIX"),
+      banco: pickKey(s, ["Banco", "BANCO"], "Banco"),
+      agencia: pickKey(s, ["Agência", "AGÊNCIA", "Agencia", "AGENCIA"], "Agência"),
+      conta: pickKey(s, ["Conta", "CONTA"], "Conta"),
+      obs: pickKey(s, ["Observações", "OBS", "Observacao", "OBSERVAÇÕES"], "Observações"),
     };
   }, [rows]);
 
+  // Enriquecimento: classifica linha (OK/PEND/CRIT)
+  const enriched = useMemo(() => {
+    return rows.map((r) => {
+      const link = safeStr(r[keys.link]);
+      const nf = safeStr(r[keys.nf]);
+      const st = safeStr(r[keys.status]);
+      const cls = statusClass(st);
+
+      const missingLink = !link;
+      const missingNF = !nf;
+
+      const isCrit = cls === "crit" || missingLink || missingNF;
+      const isPend = cls === "pend" && !isCrit;
+      const kind: "ok" | "pend" | "crit" | "unk" = isCrit ? "crit" : isPend ? "pend" : cls === "ok" ? "ok" : "unk";
+
+      const reasons: string[] = [];
+      if (missingNF) reasons.push("sem NF");
+      if (missingLink) reasons.push("sem link");
+      if (cls === "pend") reasons.push("pendência");
+      if (cls === "crit") reasons.push("crítico");
+      if (!reasons.length && kind === "unk") reasons.push("status indefinido");
+
+      return { ...r, __kind: kind, __reasons: reasons };
+    });
+  }, [rows, keys]);
+
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
-    if (!qq) return rows;
-    return rows.filter((r) => JSON.stringify(r).toLowerCase().includes(qq));
-  }, [rows, q]);
+    let list = enriched;
+
+    if (onlyCritical) list = list.filter((r: any) => r.__kind === "crit");
+    else if (onlyIssues) list = list.filter((r: any) => r.__kind === "crit" || r.__kind === "pend");
+
+    if (!qq) return list;
+    return list.filter((r: any) => JSON.stringify(r).toLowerCase().includes(qq));
+  }, [enriched, q, onlyIssues, onlyCritical]);
 
   const sorted = useMemo(() => {
-    const kNome = schemaKeys.nome;
-    const kValor = schemaKeys.valor;
-
     const copy = [...filtered];
-    copy.sort((a, b) => {
+    copy.sort((a: any, b: any) => {
       if (sortBy === "nome") {
-        const an = String(a[kNome] || "").toLowerCase();
-        const bn = String(b[kNome] || "").toLowerCase();
+        const an = safeStr(a[keys.nome]).toLowerCase();
+        const bn = safeStr(b[keys.nome]).toLowerCase();
         return sortDir === "asc" ? an.localeCompare(bn) : bn.localeCompare(an);
       } else {
-        const av = parseMoney(a[kValor]);
-        const bv = parseMoney(b[kValor]);
+        const av = parseMoney(a[keys.valor]);
+        const bv = parseMoney(b[keys.valor]);
         return sortDir === "asc" ? av - bv : bv - av;
       }
     });
     return copy;
-  }, [filtered, sortBy, sortDir, schemaKeys]);
+  }, [filtered, sortBy, sortDir, keys]);
 
   const totals = useMemo(() => {
-    const kValor = schemaKeys.valor;
-    const kLink = schemaKeys.link;
-    const kNF = schemaKeys.nf;
-    const kStatus = schemaKeys.status;
-
-    const total = sorted.reduce((acc, r) => acc + parseMoney(r[kValor]), 0);
-
-    const crit = sorted.filter((r) => {
-      const link = String(r[kLink] || "").trim();
-      const nf = String(r[kNF] || "").trim();
-      const st = String(r[kStatus] || "");
-      return !link || !nf || statusClass(st) === "crit";
-    }).length;
-
-    const pend = sorted.filter((r) => statusClass(String(r[kStatus] || "")) === "pend").length;
-    const ok = sorted.filter((r) => statusClass(String(r[kStatus] || "")) === "ok").length;
-
-    const progress = sorted.length ? Math.round((ok / sorted.length) * 100) : 0;
-
-    return { total, crit, pend, ok, progress, count: sorted.length };
-  }, [sorted, schemaKeys]);
-
-  function exportFullCSV() {
-    if (!sorted.length) return;
-
-    // tenta exportar um conjunto “bom” de colunas (e ainda inclui extras se existirem)
-    const baseHeaders = [
-      schemaKeys.nome,
-      schemaKeys.valor,
-      schemaKeys.nf,
-      schemaKeys.link,
-      schemaKeys.status,
-      schemaKeys.pix,
-      schemaKeys.banco,
-      schemaKeys.agencia,
-      schemaKeys.conta,
-      schemaKeys.obs,
-    ].filter(Boolean);
-
-    // inclui colunas extras do dataset sem duplicar
-    const allKeys = Array.from(
-      new Set(
-        sorted.reduce<string[]>((acc, r) => acc.concat(Object.keys(r || {})), [] as string[])
-      )
-    );
-    const headers = Array.from(new Set(baseHeaders.concat(allKeys)));
-
-    const csv = toCSV(sorted, headers);
-    downloadText(`FIN_${company.replace(".", "")}_${comp}_FULL.csv`, csv);
-  }
-
-  function exportPagamentoCSV() {
-    if (!sorted.length) return;
-
-    const kNome = schemaKeys.nome;
-    const kValor = schemaKeys.valor;
-    const kPix = schemaKeys.pix;
-    const kBanco = schemaKeys.banco;
-    const kAg = schemaKeys.agencia;
-    const kConta = schemaKeys.conta;
-
-    const headers = ["Nome", "Valor", "PIX", "Banco", "Agência", "Conta"];
-
-    const out = sorted.map((r) => ({
-      Nome: r[kNome] ?? "",
-      Valor: r[kValor] ?? "",
-      PIX: r[kPix] ?? "",
-      Banco: r[kBanco] ?? "",
-      "Agência": r[kAg] ?? "",
-      Conta: r[kConta] ?? "",
-    }));
-
-    const csv = toCSV(out, headers);
-    downloadText(`FIN_${company.replace(".", "")}_${comp}_PAGAMENTO.csv`, csv);
-  }
+    const total = sorted.reduce((acc: number, r: any) => acc + parseMoney(r[keys.valor]), 0);
+    const crit = sorted.filter((r: any) => r.__kind === "crit").length;
+    const pend = sorted.filter((r: any) => r.__kind === "pend").length;
+    const ok = sorted.filter((r: any) => r.__kind === "ok").length;
+    const count = sorted.length;
+    const progress = count ? Math.round((ok / count) * 100) : 0;
+    const semaforo = crit > 0 ? "🔴" : pend > 0 ? "🟡" : "🟢";
+    return { total, crit, pend, ok, count, progress, semaforo };
+  }, [sorted, keys]);
 
   function toggleSort(next: "valor" | "nome") {
     if (sortBy !== next) {
@@ -280,30 +273,112 @@ export default function FinanceClient({ role }: { role: Role }) {
     setSortDir(sortDir === "asc" ? "desc" : "asc");
   }
 
-  const semaforo = useMemo(() => {
-    if (totals.crit > 0) return "🔴";
-    if (totals.pend > 0) return "🟡";
-    return "🟢";
-  }, [totals]);
+  function exportFullCSV() {
+    if (!sorted.length) return;
+
+    const allKeys = Array.from(
+      new Set(sorted.reduce<string[]>((acc, r: any) => acc.concat(Object.keys(r || {})), []))
+    ).filter((k) => !k.startsWith("__"));
+
+    const csv = toCSV(sorted, allKeys);
+    downloadText(`FIN_${company.replace(".", "")}_${comp}_FULL.csv`, csv);
+  }
+
+  function exportPagamentoCSV() {
+    if (!sorted.length) return;
+
+    const out = sorted.map((r: any) => ({
+      Nome: r[keys.nome] ?? "",
+      Valor: r[keys.valor] ?? "",
+      PIX: r[keys.pix] ?? "",
+      Banco: r[keys.banco] ?? "",
+      "Agência": r[keys.agencia] ?? "",
+      Conta: r[keys.conta] ?? "",
+    }));
+
+    const headers = ["Nome", "Valor", "PIX", "Banco", "Agência", "Conta"];
+    const csv = toCSV(out, headers);
+    downloadText(`FIN_${company.replace(".", "")}_${comp}_PAGAMENTO.csv`, csv);
+  }
+
+  function exportPendenciasCSV() {
+    const pend = sorted.filter((r: any) => r.__kind === "crit" || r.__kind === "pend");
+    if (!pend.length) return;
+
+    const headers = [
+      keys.nome,
+      keys.valor,
+      keys.nf,
+      keys.link,
+      keys.status,
+      keys.obs,
+    ].filter(Boolean);
+
+    const csv = toCSV(pend, headers);
+    downloadText(`FIN_${company.replace(".", "")}_${comp}_PENDENCIAS.csv`, csv);
+  }
+
+  async function copyCobranca() {
+    const pend = sorted.filter((r: any) => r.__kind === "crit" || r.__kind === "pend");
+    if (!pend.length) {
+      setToast("Sem pendências pra copiar ✅");
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+
+    const lines = pend.map((r: any) => {
+      const nome = safeStr(r[keys.nome]);
+      const reason = (r.__reasons || []).join(", ");
+      return `• ${nome} — ${reason}`;
+    });
+
+    const text =
+      `📌 Cobrança de pendências PJ — ${company} — ${comp}\n` +
+      `Total pendências: ${pend.length}\n\n` +
+      lines.join("\n") +
+      `\n\n(Enviado via GC/Finance Panel)`;
+
+    await copyToClipboard(text);
+    setToast("Lista de cobrança copiada ✅");
+    setTimeout(() => setToast(null), 2500);
+  }
+
+  const rowStyle = (kind: string) => {
+    if (kind === "crit") return { background: "rgba(240,80,80,.10)" };
+    if (kind === "pend") return { background: "rgba(240,180,40,.10)" };
+    return {};
+  };
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+    <main style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 24px" }}>
+      <style>{`
+        .kpiGrid { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; }
+        @media (max-width: 1100px) { .kpiGrid { grid-template-columns: repeat(2, minmax(160px, 1fr)); } }
+        .tableWrap { margin-top: 14px; overflow-x: auto; }
+        .btnRow { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+        .subtle { opacity: .78; }
+      `}</style>
+
       <GlassCard>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h2 style={{ marginTop: 0 }}>Finance • Pagamentos PJ</h2>
-            <p style={{ opacity: 0.85, marginTop: 6 }}>
-              Visão por empresa (RBAC). Total, pendências e export pronto pro fluxo do Finance.
+            <p className="subtle" style={{ marginTop: 6 }}>
+              Desktop-first • export pronto • filtros de pendência • lista de cobrança 1-clique.
             </p>
           </div>
-          <Chip text={`${semaforo} ${totals.progress}% pronto`} />
+          <Chip text={`${totals.semaforo} ${totals.progress}% pronto`} />
         </div>
 
         {loadError ? (
           <p style={{ marginTop: 10, color: "rgba(255,180,180,.95)" }}>⚠️ {loadError}</p>
         ) : null}
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
+        {toast ? (
+          <p style={{ marginTop: 10, color: "rgba(180,255,210,.95)" }}>✅ {toast}</p>
+        ) : null}
+
+        <div className="btnRow" style={{ marginTop: 12 }}>
           <div>
             <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Empresa</div>
             <select
@@ -355,94 +430,140 @@ export default function FinanceClient({ role }: { role: Role }) {
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Nome, NF, status..." />
           </div>
 
-          <GhostButton disabled={loading} onClick={load}>
-            Atualizar
+          <GhostButton disabled={loading} onClick={load}>Atualizar</GhostButton>
+
+          <GhostButton
+            onClick={() => {
+              setOnlyCritical(false);
+              setOnlyIssues((v) => !v);
+            }}
+          >
+            {onlyIssues ? "Mostrando pendências" : "Somente pendências"}
           </GhostButton>
 
-          <PrimaryButton disabled={!sorted.length} onClick={exportFullCSV}>
-            Export CSV (full)
+          <GhostButton
+            onClick={() => {
+              setOnlyIssues(false);
+              setOnlyCritical((v) => !v);
+            }}
+          >
+            {onlyCritical ? "Mostrando críticos" : "Somente críticos"}
+          </GhostButton>
+
+          <PrimaryButton disabled={!sorted.length} onClick={copyCobranca}>
+            Copiar cobrança
           </PrimaryButton>
-
-          <GhostButton disabled={!sorted.length} onClick={exportPagamentoCSV}>
-            Export CSV (pagamento)
-          </GhostButton>
         </div>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
-          <Chip text={`Linhas: ${totals.count}`} />
-          <Chip text={`Total a pagar: R$ ${totals.total.toFixed(2)}`} />
-          <Chip text={`OK: ${totals.ok}`} />
-          <Chip text={`Pendências: ${totals.pend}`} />
-          <Chip text={`Críticos: ${totals.crit}`} />
+        <div className="kpiGrid" style={{ marginTop: 14 }}>
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Total a pagar</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>R$ {totals.total.toFixed(2)}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Soma de Valor Esperado</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Linhas</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{totals.count}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Prestadores listados</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Críticos</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{totals.crit}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Sem link/NF ou status crítico</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Pendências</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{totals.pend}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Status pendente</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>% pronto</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{totals.progress}%</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Baseado em OK/Total</div>
+          </GlassCard>
         </div>
 
-        <div style={{ marginTop: 14, overflowX: "auto" }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+          <GhostButton disabled={!sorted.length} onClick={exportFullCSV}>Export CSV (full)</GhostButton>
+          <GhostButton disabled={!sorted.length} onClick={exportPagamentoCSV}>Export CSV (pagamento)</GhostButton>
+          <GhostButton disabled={!sorted.length} onClick={exportPendenciasCSV}>Export CSV (pendências)</GhostButton>
+          <Chip text={`Ordenação: ${sortBy} (${sortDir})`} />
+        </div>
+
+        <div className="tableWrap">
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr>
                 <th
-                  style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9, cursor: "pointer" }}
-                  onClick={() => toggleSort("nome")}
-                  title="Ordenar por Nome"
+                  style={{
+                    textAlign: "left",
+                    padding: "10px 8px",
+                    borderBottom: "1px solid rgba(255,255,255,.12)",
+                    opacity: 0.9,
+                    cursor: "pointer",
+                  }}
+                  onClick={() => {
+                    if (sortBy !== "nome") { setSortBy("nome"); setSortDir("asc"); }
+                    else setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  }}
                 >
                   Nome {sortBy === "nome" ? (sortDir === "asc" ? "↑" : "↓") : ""}
                 </th>
 
                 <th
-                  style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9, cursor: "pointer" }}
-                  onClick={() => toggleSort("valor")}
-                  title="Ordenar por Valor"
+                  style={{
+                    textAlign: "left",
+                    padding: "10px 8px",
+                    borderBottom: "1px solid rgba(255,255,255,.12)",
+                    opacity: 0.9,
+                    cursor: "pointer",
+                  }}
+                  onClick={() => {
+                    if (sortBy !== "valor") { setSortBy("valor"); setSortDir("desc"); }
+                    else setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  }}
                 >
                   Valor {sortBy === "valor" ? (sortDir === "asc" ? "↑" : "↓") : ""}
                 </th>
 
-                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>
-                  NF
-                </th>
-
-                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>
-                  Link
-                </th>
-
-                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>
-                  Status
-                </th>
+                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>NF</th>
+                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>Link</th>
+                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>Situação</th>
+                <th style={{ textAlign: "left", padding: "10px 8px", borderBottom: "1px solid rgba(255,255,255,.12)", opacity: 0.9 }}>Motivo</th>
               </tr>
             </thead>
 
             <tbody>
-              {sorted.map((r, i) => {
-                const nome = r[schemaKeys.nome] ?? "";
-                const valor = r[schemaKeys.valor] ?? "";
-                const nf = r[schemaKeys.nf] ?? "";
-                const link = r[schemaKeys.link] ?? "";
-                const st = String(r[schemaKeys.status] ?? "");
-
-                const missingLink = !String(link).trim();
-                const missingNF = !String(nf).trim();
-
-                const signal = missingLink || missingNF ? "⚠️" : "✅";
+              {sorted.map((r: any, i: number) => {
+                const nome = safeStr(r[keys.nome]);
+                const valor = r[keys.valor] ?? "";
+                const nf = safeStr(r[keys.nf]);
+                const link = safeStr(r[keys.link]);
+                const st = safeStr(r[keys.status]);
+                const kind = r.__kind as "ok" | "pend" | "crit" | "unk";
+                const reasons = (r.__reasons || []).join(", ");
 
                 return (
-                  <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,.08)" }}>
-                    <td style={{ padding: "10px 8px" }}>
-                      <span style={{ marginRight: 8 }}>{signal}</span>
-                      {nome}
-                    </td>
+                  <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,.08)", ...rowStyle(kind) }}>
+                    <td style={{ padding: "10px 8px" }}>{nome}</td>
                     <td style={{ padding: "10px 8px" }}>{valor}</td>
-                    <td style={{ padding: "10px 8px" }}>{nf}</td>
+                    <td style={{ padding: "10px 8px" }}>{nf || <span style={{ opacity: 0.65 }}>—</span>}</td>
                     <td style={{ padding: "10px 8px" }}>
-                      {String(link).trim() ? (
-                        <a href={String(link)} target="_blank" style={{ opacity: 0.95 }}>
-                          abrir
-                        </a>
+                      {link ? (
+                        <a href={link} target="_blank" style={{ opacity: 0.95 }}>abrir</a>
                       ) : (
                         <span style={{ opacity: 0.65 }}>—</span>
                       )}
                     </td>
                     <td style={{ padding: "10px 8px" }}>
-                      <StatusChip text={st || (missingLink || missingNF ? "crítico" : "—")} />
+                      <RowBadge kind={kind} />
+                      <span style={{ marginLeft: 10, opacity: 0.75, fontSize: 12 }}>{st || ""}</span>
                     </td>
+                    <td style={{ padding: "10px 8px", opacity: 0.85 }}>{reasons}</td>
                   </tr>
                 );
               })}
@@ -451,7 +572,7 @@ export default function FinanceClient({ role }: { role: Role }) {
         </div>
 
         <p style={{ marginTop: 12, opacity: 0.7, fontSize: 12 }}>
-          Regra prática: se tiver <b>⚠️</b>, normalmente é falta de Link ou NF. Isso vira crítico e trava o fechamento.
+          Dica pro mês: use <b>Somente pendências</b> pra cobrar geral, e <b>Somente críticos</b> pra travas reais (sem link/NF).
         </p>
       </GlassCard>
     </main>
