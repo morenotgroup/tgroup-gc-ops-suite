@@ -9,19 +9,22 @@ function isGC(role: Role) {
   return role === "gc";
 }
 
+function safeStr(v: any) {
+  return String(v ?? "").trim();
+}
+
 function splitFlags(s: string) {
   const raw = (s || "").toUpperCase().trim();
   if (!raw) return [];
-  // separa por vírgula, ponto e vírgula, barra, pipe, espaço duplo
   return raw
     .split(/[,;|/]+/g)
     .map((x) => x.trim())
     .filter(Boolean);
 }
 
-function classifyRow(flags: string[], link: string, nf: string) {
-  const hasLink = !!String(link || "").trim();
-  const hasNF = !!String(nf || "").trim();
+function classify(flags: string[], link: string, nf: string) {
+  const hasLink = !!safeStr(link);
+  const hasNF = !!safeStr(nf);
 
   const criticalTokens = [
     "SEM_LINK",
@@ -39,10 +42,10 @@ function classifyRow(flags: string[], link: string, nf: string) {
     "SEM RATEIO",
   ];
 
-  const isCriticalByFlag = flags.some((f) => criticalTokens.some((t) => f.includes(t)));
-  const isCriticalByMissing = !hasLink || !hasNF;
+  const isCritFlag = flags.some((f) => criticalTokens.some((t) => f.includes(t)));
+  const isCritMissing = !hasLink || !hasNF;
 
-  if (isCriticalByFlag || isCriticalByMissing) return "crit";
+  if (isCritFlag || isCritMissing) return "crit";
   if (flags.length) return "warn";
   return "ok";
 }
@@ -60,13 +63,58 @@ async function fetchSheet(sheetName: string) {
   return await resp.json();
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    return true;
+  }
+}
+
+function Badge({ kind }: { kind: "ok" | "warn" | "crit" }) {
+  const base: any = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "6px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,.14)",
+    fontSize: 12,
+    background: "rgba(0,0,0,.18)",
+    whiteSpace: "nowrap",
+  };
+
+  const styles: Record<string, any> = {
+    ok: { ...base, background: "rgba(20,180,120,.18)" },
+    warn: { ...base, background: "rgba(240,180,40,.18)" },
+    crit: { ...base, background: "rgba(240,80,80,.18)" },
+  };
+
+  const dot = kind === "ok" ? "🟢" : kind === "warn" ? "🟡" : "🔴";
+  const label = kind === "ok" ? "OK" : kind === "warn" ? "AVISO" : "CRÍTICO";
+
+  return <span style={styles[kind]}>{dot} {label}</span>;
+}
+
 export default function AuditoriaClient({ role }: { role: Role }) {
   const [competencias, setCompetencias] = useState<string[]>([]);
   const [comp, setComp] = useState("FEV-26");
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
+
+  const [onlyCrit, setOnlyCrit] = useState(false);
+  const [onlyWarn, setOnlyWarn] = useState(false);
+
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -120,87 +168,143 @@ export default function AuditoriaClient({ role }: { role: Role }) {
 
   const schema = useMemo(() => {
     const sample = rows[0] || {};
-    const pick = (opts: string[]) => opts.find((k) => Object.prototype.hasOwnProperty.call(sample, k)) || opts[0];
+    const pick = (opts: string[], fb: string) => opts.find((k) => Object.prototype.hasOwnProperty.call(sample, k)) || fb;
 
     return {
-      nome: pick(["Nome", "COLABORADOR", "Colaborador"]),
-      empresa: pick(["Empresa", "EMPRESA"]),
-      nf: pick(["NF(planilha)", "NF (planilha)", "NF", "NFS-e"]),
-      link: pick(["Link(planilha)", "Link (planilha)", "Link"]),
-      flags: pick(["Flags", "FLAGS"]),
-      status: pick(["Status", "STATUS"]),
+      nome: pick(["Nome", "COLABORADOR", "Colaborador"], "Nome"),
+      empresa: pick(["Empresa", "EMPRESA"], "Empresa"),
+      nf: pick(["NF(planilha)", "NF (planilha)", "NF", "NFS-e"], "NF(planilha)"),
+      link: pick(["Link(planilha)", "Link (planilha)", "Link"], "Link(planilha)"),
+      flags: pick(["Flags", "FLAGS"], "Flags"),
+      status: pick(["Status", "STATUS"], "Status"),
     };
   }, [rows]);
 
-  const processed = useMemo(() => {
+  const enriched = useMemo(() => {
     return rows.map((r) => {
-      const flagsArr = splitFlags(String(r[schema.flags] || ""));
-      const level = classifyRow(flagsArr, String(r[schema.link] || ""), String(r[schema.nf] || ""));
-      return { ...r, __flagsArr: flagsArr, __level: level };
+      const flagsArr = splitFlags(safeStr(r[schema.flags]));
+      const level = classify(flagsArr, safeStr(r[schema.link]), safeStr(r[schema.nf]));
+      const reasons: string[] = [];
+      if (!safeStr(r[schema.nf])) reasons.push("sem NF");
+      if (!safeStr(r[schema.link])) reasons.push("sem link");
+      if (flagsArr.length) reasons.push(flagsArr.join(", "));
+      return { ...r, __flagsArr: flagsArr, __level: level, __reasons: reasons };
     });
   }, [rows, schema]);
 
   const filtered = useMemo(() => {
     const qq = q.trim().toLowerCase();
-    if (!qq) return processed;
-    return processed.filter((r) => JSON.stringify(r).toLowerCase().includes(qq));
-  }, [processed, q]);
+    let list = enriched;
+
+    if (onlyCrit) list = list.filter((r: any) => r.__level === "crit");
+    else if (onlyWarn) list = list.filter((r: any) => r.__level === "warn");
+
+    if (!qq) return list;
+    return list.filter((r: any) => JSON.stringify(r).toLowerCase().includes(qq));
+  }, [enriched, q, onlyCrit, onlyWarn]);
 
   const metrics = useMemo(() => {
     const total = filtered.length;
-    const ok = filtered.filter((r) => r.__level === "ok").length;
-    const warn = filtered.filter((r) => r.__level === "warn").length;
-    const crit = filtered.filter((r) => r.__level === "crit").length;
+    const ok = filtered.filter((r: any) => r.__level === "ok").length;
+    const warn = filtered.filter((r: any) => r.__level === "warn").length;
+    const crit = filtered.filter((r: any) => r.__level === "crit").length;
 
-    // breakdown por tipo de flag (top)
     const map = new Map<string, number>();
     for (const r of filtered) {
       const arr: string[] = r.__flagsArr || [];
       for (const f of arr) map.set(f, (map.get(f) || 0) + 1);
+      if (!safeStr(r[schema.link])) map.set("SEM_LINK", (map.get("SEM_LINK") || 0) + 1);
+      if (!safeStr(r[schema.nf])) map.set("SEM_NF", (map.get("SEM_NF") || 0) + 1);
     }
-    const breakdown = Array.from(map.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
 
+    const breakdown = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
     const semaforo = crit > 0 ? "🔴" : warn > 0 ? "🟡" : "🟢";
 
     return { total, ok, warn, crit, breakdown, semaforo };
-  }, [filtered]);
+  }, [filtered, schema]);
+
+  const topCrit = useMemo(() => {
+    return enriched
+      .filter((r: any) => r.__level === "crit")
+      .slice(0, 10)
+      .map((r: any) => ({
+        nome: safeStr(r[schema.nome]),
+        empresa: safeStr(r[schema.empresa]),
+        motivo: (r.__reasons || []).join(" • "),
+      }));
+  }, [enriched, schema]);
 
   const recomendacoes = useMemo(() => {
     const items: string[] = [];
-    const by = new Map(metrics.breakdown);
+    const keys = metrics.breakdown.map(([k]) => k);
 
-    const has = (k: string) =>
-      Array.from(by.keys()).some((x) => x.includes(k));
+    const has = (x: string) => keys.some((k) => k.includes(x));
 
     if (metrics.crit > 0) items.push(`Não liberar Finance enquanto houver críticos: ${metrics.crit}.`);
-    if (has("SEM_LINK") || has("SEM LINK")) items.push("Tem gente sem link de NF: cobrar reenvio/checar Drive e link na planilha.");
-    if (has("SEM_NF") || has("SEM NF")) items.push("Tem gente sem número de NF: cobrar o número da NFS-e (não é DPS).");
-    if (has("SEM_RATEIO") || has("SEM RATEIO")) items.push("Rateios pendentes: revisar base/colunas de empresa e proporções.");
+    if (has("SEM_LINK")) items.push("Cobrar reenvio/link de NF (tem gente sem link).");
+    if (has("SEM_NF")) items.push("Cobrar número correto da NFS-e (não é DPS).");
+    if (has("SEM_RATEIO") || has("RATEIO")) items.push("Rateios pendentes: revisar base/colunas de empresa e proporções.");
     if (has("DIVERGEN") || has("VALOR")) items.push("Divergência de valor: comparar Valor Esperado vs PDF/nota.");
-    if (has("CNPJ")) items.push("CNPJ inválido: validar tomador/prestador vs ficha cadastral da empresa.");
-    if (!items.length) items.push("Tudo ok: pode liberar Finance para pagamento. ✅");
+    if (has("CNPJ")) items.push("CNPJ inválido: validar tomador/prestador vs ficha cadastral.");
 
+    if (!items.length) items.push("Tudo ok: pode liberar Finance para pagamento. ✅");
     return items;
   }, [metrics]);
 
-  function exportCSV() {
+  function exportCSVFull() {
     if (!filtered.length) return;
-
     const headers = Array.from(
-      new Set(
-        filtered.reduce<string[]>((acc, r) => acc.concat(Object.keys(r || {})), [] as string[])
-      )
+      new Set(filtered.reduce<string[]>((acc, r: any) => acc.concat(Object.keys(r || {})), []))
     ).filter((h) => !h.startsWith("__"));
-
     const csv = toCSV(filtered, headers);
-    downloadText(`AUDITORIA_${comp}.csv`, csv);
+    downloadText(`AUDITORIA_${comp}_FULL.csv`, csv);
   }
+
+  function exportCSVCrit() {
+    const crit = enriched.filter((r: any) => r.__level === "crit");
+    if (!crit.length) return;
+    const headers = Array.from(
+      new Set(crit.reduce<string[]>((acc, r: any) => acc.concat(Object.keys(r || {})), []))
+    ).filter((h) => !h.startsWith("__"));
+    const csv = toCSV(crit, headers);
+    downloadText(`AUDITORIA_${comp}_CRITICOS.csv`, csv);
+  }
+
+  async function copyCobranca() {
+    const crit = enriched.filter((r: any) => r.__level === "crit");
+    if (!crit.length) {
+      setToast("Sem críticos pra cobrar ✅");
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+
+    const lines = crit.map((r: any) => {
+      const nome = safeStr(r[schema.nome]);
+      const empresa = safeStr(r[schema.empresa]);
+      const reason = (r.__reasons || []).filter(Boolean).join(" • ");
+      return `• ${nome} (${empresa}) — ${reason}`;
+    });
+
+    const text =
+      `🚨 Pendências CRÍTICAS PJ — ${comp}\n` +
+      `Total críticos: ${crit.length}\n\n` +
+      lines.slice(0, 40).join("\n") +
+      `\n\n(gerado via Auditoria GC)`;
+
+    await copyToClipboard(text);
+    setToast("Lista de cobrança (críticos) copiada ✅");
+    setTimeout(() => setToast(null), 2500);
+  }
+
+  const rowStyle = (level: string) => {
+    if (level === "crit") return { background: "rgba(240,80,80,.10)" };
+    if (level === "warn") return { background: "rgba(240,180,40,.10)" };
+    return {};
+  };
 
   if (!isGC(role)) {
     return (
-      <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
+      <main style={{ maxWidth: 900, margin: "0 auto", padding: "28px 24px" }}>
         <GlassCard>
           <h2 style={{ marginTop: 0 }}>Auditoria (GC)</h2>
           <p style={{ opacity: 0.85 }}>
@@ -213,23 +317,34 @@ export default function AuditoriaClient({ role }: { role: Role }) {
   }
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+    <main style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 24px" }}>
+      <style>{`
+        .kpiGrid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 12px; }
+        @media (max-width: 1100px) { .kpiGrid { grid-template-columns: repeat(2, minmax(160px, 1fr)); } }
+        .tableWrap { margin-top: 14px; overflow-x: auto; }
+        .btnRow { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+      `}</style>
+
       <GlassCard>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
             <h2 style={{ marginTop: 0 }}>Auditoria (GC)</h2>
             <p style={{ opacity: 0.85, marginTop: 6 }}>
-              Semáforo de fechamento + pendências críticas. Use isso pra destravar o Finance.
+              Semáforo de fechamento + críticos + recomendações automáticas pra destravar o Finance.
             </p>
           </div>
-          <Chip text={`${metrics.semaforo} Crítico: ${metrics.crit}`} />
+          <Chip text={`${metrics.semaforo} Críticos: ${metrics.crit}`} />
         </div>
 
         {loadError ? (
           <p style={{ marginTop: 10, color: "rgba(255,180,180,.95)" }}>⚠️ {loadError}</p>
         ) : null}
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end", marginTop: 12 }}>
+        {toast ? (
+          <p style={{ marginTop: 10, color: "rgba(180,255,210,.95)" }}>✅ {toast}</p>
+        ) : null}
+
+        <div className="btnRow" style={{ marginTop: 12 }}>
           <div>
             <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Competência</div>
             <select
@@ -245,9 +360,7 @@ export default function AuditoriaClient({ role }: { role: Role }) {
             >
               {competencias.length ? (
                 competencias.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
+                  <option key={c} value={c}>{c}</option>
                 ))
               ) : (
                 <option value={comp}>{comp}</option>
@@ -260,23 +373,63 @@ export default function AuditoriaClient({ role }: { role: Role }) {
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Nome, flags, status..." />
           </div>
 
-          <GhostButton disabled={loading} onClick={load}>
-            Atualizar
+          <GhostButton disabled={loading} onClick={load}>Atualizar</GhostButton>
+
+          <GhostButton
+            onClick={() => {
+              setOnlyWarn(false);
+              setOnlyCrit((v) => !v);
+            }}
+          >
+            {onlyCrit ? "Mostrando críticos" : "Somente críticos"}
           </GhostButton>
-          <PrimaryButton disabled={!filtered.length} onClick={exportCSV}>
-            Exportar CSV
-          </PrimaryButton>
+
+          <GhostButton
+            onClick={() => {
+              setOnlyCrit(false);
+              setOnlyWarn((v) => !v);
+            }}
+          >
+            {onlyWarn ? "Mostrando avisos" : "Somente avisos"}
+          </GhostButton>
+
+          <PrimaryButton onClick={copyCobranca}>Copiar cobrança</PrimaryButton>
         </div>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
-          <Chip text={`Total: ${metrics.total}`} />
-          <Chip text={`OK: ${metrics.ok}`} />
-          <Chip text={`Avisos: ${metrics.warn}`} />
-          <Chip text={`Crítico: ${metrics.crit}`} />
+        <div className="kpiGrid" style={{ marginTop: 14 }}>
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Total</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{metrics.total}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Registros na auditoria</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>OK</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{metrics.ok}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Sem flags críticas</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Avisos</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{metrics.warn}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Revisar, mas não trava sempre</div>
+          </GlassCard>
+
+          <GlassCard>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>Críticos</div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 900 }}>{metrics.crit}</div>
+            <div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>Trava Finance</div>
+          </GlassCard>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+          <GhostButton disabled={!filtered.length} onClick={exportCSVFull}>Export CSV (full)</GhostButton>
+          <GhostButton disabled={!enriched.length} onClick={exportCSVCrit}>Export CSV (só críticos)</GhostButton>
+          <Chip text="Breakdown de flags (top 10)" />
         </div>
 
         <div style={{ marginTop: 14 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Breakdown (top 10 flags)</div>
+          <div style={{ fontWeight: 800, marginBottom: 8 }}>Breakdown (top 10)</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {metrics.breakdown.length ? (
               metrics.breakdown.map(([k, v]) => <Chip key={k} text={`${k}: ${v}`} />)
@@ -287,22 +440,46 @@ export default function AuditoriaClient({ role }: { role: Role }) {
         </div>
 
         <div style={{ marginTop: 14 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Recomendações (automático)</div>
+          <div style={{ fontWeight: 800, marginBottom: 6 }}>Recomendações (automático)</div>
           <ul style={{ marginTop: 0, opacity: 0.85 }}>
             {recomendacoes.map((t, i) => (
-              <li key={i} style={{ marginBottom: 6 }}>
-                {t}
-              </li>
+              <li key={i} style={{ marginBottom: 6 }}>{t}</li>
             ))}
           </ul>
         </div>
 
-        <div style={{ marginTop: 12, overflowX: "auto" }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>Pendências críticas (top 30)</div>
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 800, marginBottom: 8 }}>Top 10 críticos (pra destravar rápido)</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {topCrit.length ? (
+              topCrit.map((x, i) => (
+                <div
+                  key={i}
+                  style={{
+                    borderRadius: 16,
+                    padding: 12,
+                    border: "1px solid rgba(255,255,255,.12)",
+                    background: "rgba(240,80,80,.08)",
+                  }}
+                >
+                  <div style={{ fontWeight: 900 }}>{x.nome}</div>
+                  <div style={{ opacity: 0.8, fontSize: 13, marginTop: 4 }}>{x.empresa}</div>
+                  <div style={{ opacity: 0.75, fontSize: 12, marginTop: 6 }}>{x.motivo}</div>
+                </div>
+              ))
+            ) : (
+              <span style={{ opacity: 0.7 }}>—</span>
+            )}
+          </div>
+        </div>
+
+        <div className="tableWrap">
+          <div style={{ fontWeight: 800, marginBottom: 10 }}>Pendências críticas (top 30)</div>
+
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
             <thead>
               <tr>
-                {["Nome", "Empresa", "NF(planilha)", "Link(planilha)", "Flags"].map((h) => (
+                {["Nome", "Empresa", "NF", "Link", "Flags", "Nível"].map((h) => (
                   <th
                     key={h}
                     style={{
@@ -317,32 +494,32 @@ export default function AuditoriaClient({ role }: { role: Role }) {
                 ))}
               </tr>
             </thead>
+
             <tbody>
-              {filtered
-                .filter((r) => r.__level === "crit")
+              {enriched
+                .filter((r: any) => r.__level === "crit")
                 .slice(0, 30)
-                .map((r, i) => (
-                  <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,.08)" }}>
-                    <td style={{ padding: "10px 8px" }}>{r[schema.nome] || ""}</td>
-                    <td style={{ padding: "10px 8px" }}>{r[schema.empresa] || ""}</td>
-                    <td style={{ padding: "10px 8px" }}>{r[schema.nf] || ""}</td>
+                .map((r: any, i: number) => (
+                  <tr key={i} style={{ borderBottom: "1px solid rgba(255,255,255,.08)", ...rowStyle(r.__level) }}>
+                    <td style={{ padding: "10px 8px" }}>{safeStr(r[schema.nome])}</td>
+                    <td style={{ padding: "10px 8px" }}>{safeStr(r[schema.empresa])}</td>
+                    <td style={{ padding: "10px 8px" }}>{safeStr(r[schema.nf]) || <span style={{ opacity: 0.65 }}>—</span>}</td>
                     <td style={{ padding: "10px 8px" }}>
-                      {String(r[schema.link] || "").trim() ? (
-                        <a href={String(r[schema.link])} target="_blank">
-                          abrir
-                        </a>
+                      {safeStr(r[schema.link]) ? (
+                        <a href={safeStr(r[schema.link])} target="_blank">abrir</a>
                       ) : (
                         <span style={{ opacity: 0.65 }}>—</span>
                       )}
                     </td>
-                    <td style={{ padding: "10px 8px" }}>{r[schema.flags] || ""}</td>
+                    <td style={{ padding: "10px 8px" }}>{safeStr(r[schema.flags])}</td>
+                    <td style={{ padding: "10px 8px" }}><Badge kind="crit" /></td>
                   </tr>
                 ))}
             </tbody>
           </table>
 
           <p style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>
-            Regra: liberar Finance só quando <b>Crítico</b> estiver zerado (ou justificado).
+            Regra: liberar Finance só quando <b>Críticos</b> estiver zerado (ou justificado).
           </p>
         </div>
       </GlassCard>
