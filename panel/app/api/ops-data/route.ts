@@ -78,7 +78,7 @@ function normHdr(s: string) {
 
 function stripQuotedSheetName(s: string) {
   // batchGet pode devolver "'NOME_DA_ABA'!A:Z"
-  return s.replace(/^'(.*)'$/u, "$1");
+  return s.replace(/^'(.*)'$/, "$1");
 }
 
 function toNum(v: any): number {
