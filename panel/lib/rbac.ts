@@ -1,3 +1,4 @@
+// panel/lib/rbac.ts
 export type Role = "gc" | "finance_youth" | "finance_core" | "viewer";
 
 export function canSeeCompany(role: Role, company: string) {
