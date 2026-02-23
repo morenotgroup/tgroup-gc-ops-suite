@@ -447,9 +447,9 @@ export async function GET(req: Request) {
     .filter((x) => titles.includes(x.sh));
 
   const ranges: string[] = [];
-  if (titles.includes(wantAudit)) ranges.push(`${wantAudit}!A:Z`);
-  if (titles.includes(wantPolicy)) ranges.push(`${wantPolicy}!A:Z`);
-  if (titles.includes(wantClt)) ranges.push(`${wantClt}!A:Z`);
+  if (titles.includes(wantAudit)) ranges.push(`'${wantAudit}'!A:Z`);
+  if (titles.includes(wantPolicy)) ranges.push(`'${wantPolicy}'!A:Z`);
+  if (titles.includes(wantClt)) ranges.push(`'${wantClt}'!A:Z`);
   for (const f of finSheets) ranges.push(`${f.sh}!A:Z`);
 
   if (!ranges.length) {
@@ -476,9 +476,10 @@ export async function GET(req: Request) {
 
   const mapRange: Record<string, any[][]> = {};
   for (const vr of batch.data.valueRanges || []) {
-    const base = (vr.range || "").split("!")[0];
-    mapRange[base] = (vr.values || []) as any[][];
-  }
+    const baseRaw = (vr.range || "").split("!")[0];
+// Google às vezes devolve o título assim:  'AUDITORIA_FEV-26'
+const base = baseRaw.replace(/^'(.*)'$/u, "$1");
+mapRange[base] = (vr.values || []) as any[][];
 
   // policy
   const policyValues = mapRange[wantPolicy] || [];
