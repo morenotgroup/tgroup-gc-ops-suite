@@ -6,19 +6,13 @@ import { authOptions } from "../../../lib/auth";
 import type { Role } from "../../../lib/rbac";
 import { canSeeCompany } from "../../../lib/rbac";
 
+type PolicyRule = "OBRIGATORIA" | "OPCIONAL" | "DISPENSADA";
+
 type ClosingStatus = {
   active: boolean;
   competencia: string;
   endDate: string; // YYYY-MM-DD
   triggers?: { handler: string; type: string }[];
-};
-
-type PolicyRule = "OBRIGATORIA" | "OPCIONAL" | "DISPENSADA";
-
-type PolicyEntry = {
-  rule: PolicyRule;
-  motivo: string;
-  empresa?: string;
 };
 
 type AuditRow = {
@@ -29,13 +23,13 @@ type AuditRow = {
   link: string;
   salarioMes: number;
   flags: string[];
-  empresas: string[]; // a partir do Esperado(json)
-  primaryEmpresa: string; // maior esperado
+  empresas: string[];
+  primaryEmpresa: string;
   policyRule: PolicyRule;
   policyMotivo: string;
   complianceLevel: "OK" | "PENDENTE" | "CRITICO" | "OK_OPCIONAL" | "DISPENSADO";
   motivo: string;
-  risco: number; // salarioMes quando pendente/crítico obrigatório
+  risco: number;
 };
 
 type FinanceRow = {
@@ -49,7 +43,7 @@ type FinanceRow = {
   motivo: string;
   policyRule: PolicyRule;
   policyMotivo: string;
-  complianceLevel: AuditRow["complianceLevel"] | "NAO_ENCONTRADO";
+  complianceLevel: string;
 };
 
 function getServiceAccountAuth() {
@@ -69,7 +63,17 @@ function normName(s: string) {
     .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // remove acentos
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normHdr(s: string) {
+  return (s || "")
+    .toString()
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
 }
 
 function toNum(v: any): number {
@@ -94,8 +98,17 @@ function safeJsonParse(s: any) {
   }
 }
 
+function idx(header: any[], candidates: string[]) {
+  const H = header.map((h) => normHdr(String(h ?? "")));
+  for (const c of candidates) {
+    const i = H.indexOf(normHdr(c));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
 function companyKey(company: string) {
-  return company.replace(".", ""); // T.Youth -> TYouth
+  return company.replace(".", "");
 }
 
 function finSheetName(company: string, comp: string) {
@@ -127,6 +140,51 @@ function pickPrimaryCompany(esperado: Record<string, any>) {
   return best || "";
 }
 
+function detectHardErrors(flags: string[]) {
+  const up = flags.map((f) => normHdr(f));
+  return up.some((f) => f.includes("SEM_RATEIO") || f.includes("SEM SALARIO") || f.includes("SEM_SALARIO"));
+}
+
+function defaultRuleFromEmpresas(empresas: string[]) {
+  // Youth puro => opcional
+  if (empresas.length === 1 && empresas[0] === "T.Youth") return "OPCIONAL" as PolicyRule;
+  return "OBRIGATORIA" as PolicyRule;
+}
+
+function levelFromAudit(params: {
+  missingNF: boolean;
+  missingLink: boolean;
+  inWindow: boolean;
+  hardErrors: boolean;
+  rule: PolicyRule;
+}) {
+  const missing = params.missingNF || params.missingLink;
+
+  if (params.rule === "DISPENSADA") return "DISPENSADO" as const;
+  if (params.hardErrors) return "CRITICO" as const;
+  if (!missing) return "OK" as const;
+  if (params.rule === "OPCIONAL") return "OK_OPCIONAL" as const;
+
+  return params.inWindow ? ("PENDENTE" as const) : ("CRITICO" as const);
+}
+
+function payLevelFromFinance(params: {
+  company: string;
+  missingNF: boolean;
+  missingLink: boolean;
+  inWindow: boolean;
+  rule: PolicyRule;
+}) {
+  const missing = params.missingNF || params.missingLink;
+
+  // Youth nunca trava pagamento
+  if (params.company === "T.Youth") return "OK" as const;
+
+  if (params.rule === "DISPENSADA") return "OK" as const;
+  if (!missing) return "OK" as const;
+  return params.inWindow ? ("PENDENTE" as const) : ("CRITICO" as const);
+}
+
 async function fetchClosingStatus(comp: string): Promise<{ status: ClosingStatus | null; inWindow: boolean; daysLeft: number | null }> {
   const url = process.env.APPS_SCRIPT_WEBAPP_URL;
   const key = process.env.BOT_API_KEY;
@@ -136,7 +194,6 @@ async function fetchClosingStatus(comp: string): Promise<{ status: ClosingStatus
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ key, action: "status" }),
-    // evitar cache
     cache: "no-store",
   });
 
@@ -150,135 +207,85 @@ async function fetchClosingStatus(comp: string): Promise<{ status: ClosingStatus
       }
     : null;
 
-  if (!st || !st.active || st.competencia !== comp || !st.endDate) {
-    return { status: st, inWindow: false, daysLeft: null };
-  }
+  if (!st || !st.active || st.competencia !== comp || !st.endDate) return { status: st, inWindow: false, daysLeft: null };
 
   const today = new Date();
   const end = new Date(st.endDate + "T23:59:59");
   const inWindow = today <= end;
-
   const daysLeft = inWindow ? Math.max(0, Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))) : 0;
+
   return { status: st, inWindow, daysLeft };
 }
 
-function detectHardErrors(flags: string[]) {
-  // erros que sempre travam (independente da janela)
-  const hard = new Set(["SEM_RATEIO", "SEM_SALARIO_MES"]);
-  return flags.some((f) => hard.has(f));
-}
-
-function defaultRuleFromEmpresas(empresas: string[]) {
-  // só Youth => opcional
-  if (empresas.length === 1 && empresas[0] === "T.Youth") return "OPCIONAL" as PolicyRule;
-  return "OBRIGATORIA" as PolicyRule;
-}
-
-function levelFromAuditRow(params: {
-  missingNF: boolean;
-  missingLink: boolean;
-  inWindow: boolean;
-  hardErrors: boolean;
-  rule: PolicyRule;
-}) {
-  const missing = params.missingNF || params.missingLink;
-
-  if (params.rule === "DISPENSADA") return "DISPENSADO" as const;
-  if (params.hardErrors) return "CRITICO" as const;
-
-  if (!missing) return "OK" as const;
-
-  if (params.rule === "OPCIONAL") return "OK_OPCIONAL" as const;
-
-  return params.inWindow ? ("PENDENTE" as const) : ("CRITICO" as const);
-}
-
-function payLevelFromFinanceRow(params: {
-  company: string;
-  missingNF: boolean;
-  missingLink: boolean;
-  inWindow: boolean;
-  rule: PolicyRule;
-  complianceLevel: AuditRow["complianceLevel"] | "NAO_ENCONTRADO";
-}) {
-  const missing = params.missingNF || params.missingLink;
-
-  // Youth não trava pagamento (regra do negócio)
-  if (params.company === "T.Youth") return "OK" as const;
-
-  if (params.rule === "DISPENSADA") return "OK" as const;
-  if (!missing) return "OK" as const;
-
-  return params.inWindow ? ("PENDENTE" as const) : ("CRITICO" as const);
-}
-
-function parsePolicy(values: any[][]): Record<string, PolicyEntry> {
+function parsePolicy(values: any[][]): Record<string, { rule: PolicyRule; motivo: string }> {
   if (!values || values.length < 2) return {};
-  const header = values[0].map((x) => String(x || "").trim());
-  const idx = (h: string) => header.findIndex((c) => c.toUpperCase() === h.toUpperCase());
+  const header = values[0];
 
-  const iColab = idx("COLABORADOR");
-  const iRegra = idx("REGRA");
-  const iMotivo = idx("MOTIVO");
-  const iEmp = idx("EMPRESA");
+  const iColab = idx(header, ["COLABORADOR", "NOME"]);
+  const iRegra = idx(header, ["REGRA"]);
+  const iMotivo = idx(header, ["MOTIVO"]);
 
-  const out: Record<string, PolicyEntry> = {};
+  const out: Record<string, { rule: PolicyRule; motivo: string }> = {};
   for (const r of values.slice(1)) {
     const nome = iColab >= 0 ? String(r[iColab] || "").trim() : "";
     if (!nome) continue;
 
     const regraRaw = iRegra >= 0 ? String(r[iRegra] || "").trim().toUpperCase() : "";
     const motivo = iMotivo >= 0 ? String(r[iMotivo] || "").trim() : "";
-    const empresa = iEmp >= 0 ? String(r[iEmp] || "").trim() : "";
 
     let rule: PolicyRule = "OBRIGATORIA";
     if (regraRaw.includes("DISP")) rule = "DISPENSADA";
     else if (regraRaw.includes("OPC")) rule = "OPCIONAL";
     else if (regraRaw.includes("OBR")) rule = "OBRIGATORIA";
 
-    out[normName(nome)] = { rule, motivo, empresa };
+    out[normName(nome)] = { rule, motivo };
   }
   return out;
 }
 
-function parseAudit(values: any[][], policy: Record<string, PolicyEntry>, inWindow: boolean): { rows: AuditRow[]; byName: Record<string, AuditRow> } {
-  if (!values || values.length < 2) return { rows: [], byName: {} };
+function parseAudit(values: any[][], policy: Record<string, { rule: PolicyRule; motivo: string }>, inWindow: boolean) {
+  if (!values || values.length < 2) return { rows: [] as AuditRow[], byName: {} as Record<string, AuditRow>, debugHeader: [] as string[] };
 
-  const header = values[0].map((x) => String(x || "").trim());
-  const get = (r: any[], h: string) => {
-    const i = header.findIndex((c) => c === h);
-    return i >= 0 ? r[i] : "";
-  };
+  const header = values[0];
+  const Hnorm = header.map((h) => normHdr(String(h ?? "")));
 
-  const out: AuditRow[] = [];
+  // candidatos tolerantes
+  const iNome = idx(header, ["NOME", "Nome", "COLABORADOR", "COLABORADOR(A)"]);
+  const iComp = idx(header, ["COMPETÊNCIA", "COMPETENCIA", "COMP"]);
+  const iStatus = idx(header, ["STATUS", "SITUAÇÃO", "SITUACAO"]);
+  const iNF = idx(header, ["NF(PLANILHA)", "NF (PLANILHA)", "NF", "NFS-E", "NFS-e", "NUMERO DA NFS-E", "NÚMERO DA NFS-E"]);
+  const iLink = idx(header, ["LINK(PLANILHA)", "LINK (PLANILHA)", "LINK", "URL", "LINK NF", "LINK DA NF"]);
+  const iSalMes = idx(header, ["SALÁRIO MÊS", "SALARIO MES", "TOTAL SALARIO MES", "TOTAL SALÁRIO MÊS", "BW"]);
+  const iFlags = idx(header, ["FLAGS", "FLAG"]);
+  const iEsperado = idx(header, ["ESPERADO(JSON)", "ESPERADO (JSON)", "ESPERADO", "RATEIO JSON"]);
+
+  const rows: AuditRow[] = [];
   const byName: Record<string, AuditRow> = {};
 
   for (const r of values.slice(1)) {
-    const nome = String(get(r, "Nome") || "").trim();
+    const nome = iNome >= 0 ? String(r[iNome] || "").trim() : "";
     if (!nome) continue;
 
-    const comp = String(get(r, "Competência") || "").trim();
-    const status = String(get(r, "Status") || "").trim();
-    const nf = String(get(r, "NF(planilha)") || "").trim();
-    const link = String(get(r, "Link(planilha)") || "").trim();
-    const salarioMes = toNum(get(r, "Salário Mês"));
+    const nf = iNF >= 0 ? String(r[iNF] || "").trim() : "";
+    const link = iLink >= 0 ? String(r[iLink] || "").trim() : "";
+    const salarioMes = iSalMes >= 0 ? toNum(r[iSalMes]) : 0;
 
-    const flagsRaw = String(get(r, "Flags") || "").trim();
+    const flagsRaw = iFlags >= 0 ? String(r[iFlags] || "").trim() : "";
     const flags = flagsRaw ? flagsRaw.split(",").map((x) => x.trim()).filter(Boolean) : [];
 
-    const esperadoJson = safeJsonParse(get(r, "Esperado(json)"));
+    const esperadoJson = iEsperado >= 0 ? safeJsonParse(r[iEsperado]) : {};
     const empresas = Object.keys(esperadoJson || {}).filter(Boolean);
     const primaryEmpresa = pickPrimaryCompany(esperadoJson);
 
-    const p = policy[normName(nome)];
-    const policyRule = p?.rule || defaultRuleFromEmpresas(empresas);
-    const policyMotivo = p?.motivo || "";
+    const pol = policy[normName(nome)];
+    const policyRule = pol?.rule || defaultRuleFromEmpresas(empresas);
+    const policyMotivo = pol?.motivo || "";
 
     const hardErrors = detectHardErrors(flags);
     const missingNF = !nf;
     const missingLink = !link;
 
-    const complianceLevel = levelFromAuditRow({
+    const complianceLevel = levelFromAudit({
       missingNF,
       missingLink,
       inWindow,
@@ -290,12 +297,12 @@ function parseAudit(values: any[][], policy: Record<string, PolicyEntry>, inWind
     if (complianceLevel === "DISPENSADO") motivo = policyMotivo ? `Dispensado: ${policyMotivo}` : "Dispensado por policy";
     else if (complianceLevel === "OK_OPCIONAL") motivo = "NF opcional";
     else if (complianceLevel === "PENDENTE") motivo = "Dentro da janela (pendente)";
-    else if (complianceLevel === "CRITICO") {
-      if (hardErrors) motivo = "Erro estrutural (rateio/salário mês)";
-      else motivo = "Fora da janela (crítico)";
-    }
+    else if (complianceLevel === "CRITICO") motivo = hardErrors ? "Erro estrutural (rateio/salário)" : "Fora da janela (crítico)";
 
     const risco = (complianceLevel === "PENDENTE" || complianceLevel === "CRITICO") && policyRule === "OBRIGATORIA" ? salarioMes : 0;
+
+    const comp = iComp >= 0 ? String(r[iComp] || "").trim() : "";
+    const status = iStatus >= 0 ? String(r[iStatus] || "").trim() : "";
 
     const row: AuditRow = {
       nome,
@@ -314,29 +321,30 @@ function parseAudit(values: any[][], policy: Record<string, PolicyEntry>, inWind
       risco,
     };
 
-    out.push(row);
+    rows.push(row);
     byName[normName(nome)] = row;
   }
 
-  return { rows: out, byName };
+  return { rows, byName, debugHeader: Hnorm };
 }
 
 function parseFinance(
   company: string,
   values: any[][],
-  policy: Record<string, PolicyEntry>,
+  policy: Record<string, { rule: PolicyRule; motivo: string }>,
   auditByName: Record<string, AuditRow>,
   inWindow: boolean
-): FinanceRow[] {
-  if (!values || values.length < 2) return [];
+) {
+  if (!values || values.length < 2) return { rows: [] as FinanceRow[], debugHeader: [] as string[] };
 
-  const header = values[0].map((x) => String(x || "").trim());
-  const idx = (h: string) => header.findIndex((c) => c === h);
-  const iNome = idx("Nome");
-  const iComp = idx("Competência");
-  const iVal = idx("Valor Esperado");
-  const iNF = idx("NF(planilha)");
-  const iLink = idx("Link(planilha)");
+  const header = values[0];
+  const Hnorm = header.map((h) => normHdr(String(h ?? "")));
+
+  const iNome = idx(header, ["NOME", "Nome", "COLABORADOR"]);
+  const iComp = idx(header, ["COMPETÊNCIA", "COMPETENCIA", "COMP"]);
+  const iVal = idx(header, ["VALOR ESPERADO", "Valor Esperado", "VALOR", "SALARIO MES", "SALÁRIO MÊS", "TOTAL"]);
+  const iNF = idx(header, ["NF(PLANILHA)", "NF (PLANILHA)", "NF", "NFS-E"]);
+  const iLink = idx(header, ["LINK(PLANILHA)", "LINK (PLANILHA)", "LINK", "URL"]);
 
   const out: FinanceRow[] = [];
 
@@ -349,23 +357,19 @@ function parseFinance(
     const nf = iNF >= 0 ? String(r[iNF] || "").trim() : "";
     const link = iLink >= 0 ? String(r[iLink] || "").trim() : "";
 
-    const p = policy[normName(nome)];
-    const policyRule = p?.rule || (company === "T.Youth" ? ("OPCIONAL" as PolicyRule) : ("OBRIGATORIA" as PolicyRule));
-    const policyMotivo = p?.motivo || "";
-
-    const audit = auditByName[normName(nome)];
-    const complianceLevel = audit ? audit.complianceLevel : "NAO_ENCONTRADO";
+    const pol = policy[normName(nome)];
+    const policyRule = pol?.rule || (company === "T.Youth" ? ("OPCIONAL" as PolicyRule) : ("OBRIGATORIA" as PolicyRule));
+    const policyMotivo = pol?.motivo || "";
 
     const missingNF = !nf;
     const missingLink = !link;
 
-    const payLevel = payLevelFromFinanceRow({
+    const payLevel = payLevelFromFinance({
       company,
       missingNF,
       missingLink,
       inWindow,
       rule: policyRule,
-      complianceLevel,
     });
 
     let motivo = "";
@@ -374,7 +378,6 @@ function parseFinance(
     if (company === "T.Youth") {
       if (!missing) motivo = "";
       else {
-        // Youth: pagamento segue sempre; compliance pode ser opcional ou pendente por GC
         if (policyRule === "DISPENSADA") motivo = policyMotivo ? `Dispensado: ${policyMotivo}` : "Dispensado por policy";
         else if (policyRule === "OPCIONAL") motivo = "NF opcional (T.Youth)";
         else motivo = "NF pendente (GC) — pagamento segue (T.Youth)";
@@ -384,6 +387,9 @@ function parseFinance(
       else if (!missing) motivo = "";
       else motivo = `${missingNF ? "sem NF" : ""}${missingNF && missingLink ? ", " : ""}${missingLink ? "sem link" : ""}`.trim();
     }
+
+    const audit = auditByName[normName(nome)];
+    const complianceLevel = audit ? audit.complianceLevel : "NAO_ENCONTRADO";
 
     out.push({
       empresa: company,
@@ -400,7 +406,7 @@ function parseFinance(
     });
   }
 
-  return out;
+  return { rows: out, debugHeader: Hnorm };
 }
 
 function sumBy<T>(arr: T[], fn: (x: T) => number) {
@@ -412,10 +418,8 @@ export async function GET(req: Request) {
   if (!session?.user?.email) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
   const role = (session.role || "viewer") as Role;
-
   const url = new URL(req.url);
   const comp = String(url.searchParams.get("comp") || "FEV-26").trim().toUpperCase();
-  if (!comp) return NextResponse.json({ ok: false, error: "missing comp" }, { status: 400 });
 
   const spreadsheetId = process.env.SPREADSHEET_ID;
   if (!spreadsheetId) return NextResponse.json({ ok: false, error: "missing SPREADSHEET_ID env" }, { status: 500 });
@@ -423,10 +427,8 @@ export async function GET(req: Request) {
   const auth = getServiceAccountAuth();
   const sheets = google.sheets({ version: "v4", auth });
 
-  // 1) status de janela
   const closing = await fetchClosingStatus(comp);
 
-  // 2) lista de abas existentes (evita batchGet quebrar)
   const meta = await sheets.spreadsheets.get({
     spreadsheetId,
     fields: "sheets(properties(title))",
@@ -445,12 +447,11 @@ export async function GET(req: Request) {
     .filter((x) => titles.includes(x.sh));
 
   const ranges: string[] = [];
-  if (titles.includes(wantAudit)) ranges.push(`${wantAudit}!A:K`);
+  if (titles.includes(wantAudit)) ranges.push(`${wantAudit}!A:Z`);
   if (titles.includes(wantPolicy)) ranges.push(`${wantPolicy}!A:Z`);
   if (titles.includes(wantClt)) ranges.push(`${wantClt}!A:Z`);
-  for (const f of finSheets) ranges.push(`${f.sh}!A:G`);
+  for (const f of finSheets) ranges.push(`${f.sh}!A:Z`);
 
-  // se ainda não existirem abas (primeiro dia), devolve vazio mas ok
   if (!ranges.length) {
     return NextResponse.json({
       ok: true,
@@ -460,9 +461,10 @@ export async function GET(req: Request) {
       daysLeft: closing.daysLeft,
       allowedCompanies,
       policy: { sheet: wantPolicy, count: 0 },
-      audit: { rows: [], counts: {}, risk: { pendente: 0, critico: 0 } },
-      finance: { rows: [], counts: {}, totals: {} },
+      audit: { rows: [], counts: { total: 0 }, risk: { pendente: 0, critico: 0 } },
+      finance: { rows: [], counts: { total: 0 }, totals: { totalPagar: 0 } },
       clt: { sheet: wantClt, rows: 0, totalLiquido: 0 },
+      debug: { titlesFound: titles.length, wantAudit, finSheets: finSheets.map((x) => x.sh) },
     });
   }
 
@@ -474,34 +476,34 @@ export async function GET(req: Request) {
 
   const mapRange: Record<string, any[][]> = {};
   for (const vr of batch.data.valueRanges || []) {
-    const r = vr.range || "";
-    const base = r.split("!")[0]; // sheet title
+    const base = (vr.range || "").split("!")[0];
     mapRange[base] = (vr.values || []) as any[][];
   }
 
-  // 3) policy
+  // policy
   const policyValues = mapRange[wantPolicy] || [];
   const policy = parsePolicy(policyValues);
 
-  // 4) auditoria (compliance)
+  // audit
   const auditValues = mapRange[wantAudit] || [];
   const auditParsed = parseAudit(auditValues, policy, closing.inWindow);
 
-  // filtra auditoria por RBAC (impacto em empresas permitidas)
+  // finance
+  let financeRows: FinanceRow[] = [];
+  const finHeaders: Record<string, string[]> = {};
+
+  for (const f of finSheets) {
+    const vals = mapRange[f.sh] || [];
+    const parsed = parseFinance(f.c, vals, policy, auditParsed.byName, closing.inWindow);
+    financeRows = financeRows.concat(parsed.rows);
+    finHeaders[f.sh] = parsed.debugHeader;
+  }
+
   const auditRowsRBAC = auditParsed.rows.filter((r) => {
-    if (role === "gc") return true; // GC vê tudo
-    // finance: só entra se a linha impacta alguma empresa permitida
+    if (role === "gc") return true;
     return r.empresas.some((e) => allowedCompanies.includes(e));
   });
 
-  // 5) finance (pagamento)
-  let financeRows: FinanceRow[] = [];
-  for (const f of finSheets) {
-    const vals = mapRange[f.sh] || [];
-    financeRows = financeRows.concat(parseFinance(f.c, vals, policy, auditParsed.byName, closing.inWindow));
-  }
-
-  // ====== métricas auditoria
   const auditCounts = {
     total: auditRowsRBAC.length,
     ok: auditRowsRBAC.filter((r) => r.complianceLevel === "OK").length,
@@ -516,7 +518,6 @@ export async function GET(req: Request) {
     critico: sumBy(auditRowsRBAC.filter((r) => r.complianceLevel === "CRITICO"), (r) => r.risco),
   };
 
-  // ====== métricas finance
   const financeCounts = {
     total: financeRows.length,
     ok: financeRows.filter((r) => r.payLevel === "OK").length,
@@ -532,15 +533,16 @@ export async function GET(req: Request) {
     totalPagarCritico: sumBy(financeRows.filter((r) => r.payLevel === "CRITICO"), (r) => r.valorEsperado),
   };
 
-  // ====== CLT summary (tenta inferir colunas comuns)
+  // CLT
   const cltValues = mapRange[wantClt] || [];
   let cltRows = 0;
   let cltTotalLiquido = 0;
 
   if (cltValues.length >= 2) {
-    const h = cltValues[0].map((x) => String(x || "").trim().toLowerCase());
-    const iLiquido = h.findIndex((c) => c.includes("líquido") || c.includes("liquido") || c.includes("net"));
-    // fallback: se não existir, tenta "total" + "líquido"
+    const h = cltValues[0].map((x) => normHdr(String(x || "")));
+    const iLiquido =
+      h.findIndex((c) => c.includes("LIQUIDO") || c.includes("LÍQUIDO") || c.includes("NET")) ?? -1;
+
     for (const r of cltValues.slice(1)) {
       const anyCell = r.some((x) => String(x || "").trim() !== "");
       if (!anyCell) continue;
@@ -548,23 +550,6 @@ export async function GET(req: Request) {
       if (iLiquido >= 0) cltTotalLiquido += toNum(r[iLiquido]);
     }
   }
-
-  // ordena finance por empresa + nome
-  financeRows.sort((a, b) => (a.empresa + a.nome).localeCompare(b.empresa + b.nome, "pt-BR"));
-
-  // ordena auditoria por nível (critico->pend->ok) e nome
-  const levelOrder: Record<AuditRow["complianceLevel"], number> = {
-    CRITICO: 0,
-    PENDENTE: 1,
-    OK: 2,
-    OK_OPCIONAL: 3,
-    DISPENSADO: 4,
-  };
-  auditRowsRBAC.sort((a, b) => {
-    const da = levelOrder[a.complianceLevel] - levelOrder[b.complianceLevel];
-    if (da !== 0) return da;
-    return a.nome.localeCompare(b.nome, "pt-BR");
-  });
 
   return NextResponse.json({
     ok: true,
@@ -577,5 +562,13 @@ export async function GET(req: Request) {
     audit: { rows: auditRowsRBAC, counts: auditCounts, risk: auditRisk },
     finance: { rows: financeRows, counts: financeCounts, totals: financeTotals },
     clt: { sheet: wantClt, rows: cltRows, totalLiquido: cltTotalLiquido },
+    debug: {
+      wantAudit,
+      gotAudit: titles.includes(wantAudit),
+      auditHeader: auditParsed.debugHeader,
+      finSheets: finSheets.map((x) => x.sh),
+      finHeaders,
+      titlesFound: titles.length,
+    },
   });
 }
